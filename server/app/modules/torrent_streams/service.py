@@ -65,8 +65,31 @@ class TorrentStreamsService:
             filtered_torrent_streams, user
         )
 
-        if user.only_best_torrent:
-            sorted_torrent_streams = sorted_torrent_streams[:1]
+        if user.enable_smart_filter:
+            limit = user.smart_filter_limit
+
+            if not user.smart_filter_grouping_preference_id:
+                sorted_torrent_streams = sorted_torrent_streams[:limit]
+            else:
+                grouped_torrent_streams: list[TorrentStream] = []
+                seen_attribute_ids: set[frozenset[str]] = set()
+
+                for torrent_stream in sorted_torrent_streams:
+                    target_attributes = frozenset(
+                        attribute.id
+                        for attribute in torrent_stream.attributes
+                        if attribute.preference_id
+                        == user.smart_filter_grouping_preference_id
+                    )
+
+                    if target_attributes not in seen_attribute_ids:
+                        seen_attribute_ids.add(target_attributes)
+                        grouped_torrent_streams.append(torrent_stream)
+
+                if not grouped_torrent_streams and sorted_torrent_streams:
+                    grouped_torrent_streams = sorted_torrent_streams[:1]
+
+                sorted_torrent_streams = grouped_torrent_streams[:limit]
 
         return sorted_torrent_streams, indexer_errors
 
@@ -100,6 +123,7 @@ class TorrentStreamsService:
         torrent_stream: TorrentStream,
         excluded_attribute_ids: set[str],
         preference_multiple_map: dict[str, bool],
+        preference_strict_exclusion_map: dict[str, bool],
     ) -> bool:
         attributes_by_preference: dict[str, list[AttributeModel]] = {}
         unassociated_attributes: list[AttributeModel] = []
@@ -120,8 +144,9 @@ class TorrentStreamsService:
 
         for preference_id, attributes in attributes_by_preference.items():
             is_multiple = preference_multiple_map.get(preference_id, False)
+            strict_exclusion = preference_strict_exclusion_map.get(preference_id, False)
 
-            if is_multiple:
+            if is_multiple and not strict_exclusion:
                 if all(
                     attribute.id in excluded_attribute_ids for attribute in attributes
                 ):
@@ -147,6 +172,9 @@ class TorrentStreamsService:
         preference_multiple_map = {
             preference.id: preference.multiple for preference in preferences
         }
+        preference_strict_exclusion_map = {
+            preference.id: preference.strict_exclusion for preference in preferences
+        }
 
         filtered_torrent_streams: list[TorrentStream] = []
         for torrent_stream in torrent_streams:
@@ -160,6 +188,7 @@ class TorrentStreamsService:
                 torrent_stream=torrent_stream,
                 excluded_attribute_ids=excluded_attribute_ids,
                 preference_multiple_map=preference_multiple_map,
+                preference_strict_exclusion_map=preference_strict_exclusion_map,
             ):
                 continue
 

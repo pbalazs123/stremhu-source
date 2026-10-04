@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated
 
 import content_types
@@ -54,7 +55,10 @@ async def stream(
 
     with isolated_db_session() as local_db:
         auth_service = create_auth_service(local_db)
-        user = auth_service.verify_api_key(api_key=api_key)
+        user = await asyncio.to_thread(
+            auth_service.verify_api_key,
+            api_key=api_key,
+        )
 
         playbacks_service = create_playbacks_service(
             relay_service=get_relay_service(),
@@ -94,6 +98,7 @@ async def stream(
     headers = {
         "Accept-Ranges": "bytes",
         "Cache-Control": "no-store, no-transform",
+        "Connection": "close",
     }
 
     if range_header is None:
@@ -140,6 +145,7 @@ def _apply_capitalized_headers(response: Response) -> Response:
         b"accept-ranges": b"Accept-Ranges",
         b"cache-control": b"Cache-Control",
         b"content-type": b"Content-Type",
+        b"connection": b"Connection",
     }
     headers = []
     for key, value in response.raw_headers:
