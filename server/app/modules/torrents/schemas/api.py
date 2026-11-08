@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.alias_generators import to_camel
 
 from app.modules.indexer_definitions.schemas.api import IndexerDefinitionResponse
@@ -52,19 +52,31 @@ class TorrentResponse(BaseModel):
 
 
 class TorrentAddRequest(BaseModel):
-    """Torrent hozzáadása az indexer azonosítója alapján (pl. nCore torrent ID)."""
+    """Torrent hozzáadása: az indexer adatlap linkje (url), vagy indexerId + torrentId."""
 
     model_config = ConfigDict(
         populate_by_name=True,
         alias_generator=to_camel,
     )
 
-    indexer_id: str = Field(pattern=r"^[a-z0-9_-]{1,32}$")
-    torrent_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    url: str | None = Field(default=None, min_length=8, max_length=500)
+    indexer_id: str | None = Field(default=None, pattern=r"^[a-z0-9_-]{1,32}$")
+    torrent_id: str | None = Field(default=None, pattern=r"^[A-Za-z0-9_-]{1,64}$")
     # None: a legnagyobb videófájl
     file_index: int | None = Field(default=None, ge=0)
     full_download: bool = True
     is_persisted: bool | None = None
+
+    @model_validator(mode="after")
+    def _one_way_to_name_the_torrent(self) -> "TorrentAddRequest":
+        has_ids = self.indexer_id is not None or self.torrent_id is not None
+        if self.url is not None and has_ids:
+            raise ValueError(
+                "Vagy url, vagy indexerId + torrentId, a kettő együtt nem."
+            )
+        if self.url is None and (self.indexer_id is None or self.torrent_id is None):
+            raise ValueError("Add meg az url-t, vagy az indexerId-t és a torrentId-t.")
+        return self
 
 
 class TorrentUpdateRequest(BaseModel):
