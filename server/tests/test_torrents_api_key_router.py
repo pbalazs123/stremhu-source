@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi import HTTPException
 from fastapi.testclient import TestClient
+from sqlalchemy.exc import OperationalError
 
 from app.main import app
 from app.modules.auth.dependencies import get_auth_service
@@ -13,8 +14,11 @@ from app.modules.indexer_accounts.dependencies import get_indexer_accounts_servi
 from app.modules.indexer_definitions.dependencies import (
     get_indexer_definitions_service,
 )
+from app.modules.playback_histories.schemas.internal import PlaybackHistoryClientInfo
 from app.modules.relay.dependencies import get_relay_service
+from app.modules.stream import service as stream_service_module
 from app.modules.stream.dependencies import get_stream_service
+from app.modules.stream.schemas import StreamToken
 from app.modules.stream.service import StreamService
 from app.modules.torrents.api_key_router import MANUAL_ADD_CLIENT
 from app.modules.torrents.dependencies import get_torrents_service
@@ -325,3 +329,49 @@ def test_ensure_torrent_existing_keeps_stream_path_unchanged():
     assert pair is existing
     assert index == 3
     torrent_files.find_by_id.assert_not_called()
+
+
+def _history_args():
+    return dict(
+        stream_token=StreamToken(
+            indexer_id="ncore", torrent_id="1", file_index=0, playback_id="p1"
+        ),
+        client_info=PlaybackHistoryClientInfo(user_agent="test", ip=None),
+        user_id="u1",
+        file=SimpleNamespace(name="a.mkv", torrent=SimpleNamespace(name="A")),
+    )
+
+
+def test_playback_history_retries_when_database_is_locked(monkeypatch):
+    """Foglalt SQLite esetén újrapróbál: az előzmény nem veszhet el csendben."""
+    monkeypatch.setattr(stream_service_module, "PLAYBACK_HISTORY_RETRY_DELAYS", (0, 0))
+    service, _ = _stream_service(None)
+    locked = OperationalError("INSERT", {}, Exception("database is locked"))
+    with patch.object(
+        StreamService, "_save_playback_history", side_effect=[locked, locked, None]
+    ) as save:
+        asyncio.run(service.save_playback_history(**_history_args()))
+    assert save.call_count == 3
+
+
+def test_playback_history_gives_up_after_retries(monkeypatch):
+    monkeypatch.setattr(stream_service_module, "PLAYBACK_HISTORY_RETRY_DELAYS", (0, 0))
+    service, _ = _stream_service(None)
+    locked = OperationalError("INSERT", {}, Exception("database is locked"))
+    with patch.object(
+        StreamService, "_save_playback_history", side_effect=locked
+    ) as save:
+        # logs, never raises
+        asyncio.run(service.save_playback_history(**_history_args()))
+    assert save.call_count == 3
+
+
+def test_playback_history_other_errors_are_not_retried(monkeypatch):
+    monkeypatch.setattr(stream_service_module, "PLAYBACK_HISTORY_RETRY_DELAYS", (0, 0))
+    service, _ = _stream_service(None)
+    broken = OperationalError("INSERT", {}, Exception("no such table"))
+    with patch.object(
+        StreamService, "_save_playback_history", side_effect=broken
+    ) as save:
+        asyncio.run(service.save_playback_history(**_history_args()))
+    assert save.call_count == 1
