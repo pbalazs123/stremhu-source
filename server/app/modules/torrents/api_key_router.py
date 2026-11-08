@@ -1,16 +1,22 @@
 """Torrentek kezelése API kulccsal (admin), munkamenet nélkül.
 
 Ugyanazok a műveletek, mint a /torrents útvonalakon, plusz a kézi hozzáadás:
-egy indexer torrent (pl. nCore ID) a relay-be kerül, mintha elindították
-volna (lejátszási előzmény is készül), de adatot nem streamel.
+egy indexer torrent (adatlap link, vagy indexer + torrent ID) a relay-be kerül,
+mintha elindították volna (lejátszási előzmény is készül), de adatot nem streamel.
 """
 
 import uuid
 from typing import Annotated
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, HTTPException, Request, status
 
 from app.modules.auth.dependencies import ApiKeyGuard
+from app.modules.indexer_accounts.dependencies import get_indexer_accounts_service
+from app.modules.indexer_accounts.service import IndexerAccountsService
+from app.modules.indexer_definitions.dependencies import (
+    get_indexer_definitions_service,
+)
+from app.modules.indexer_definitions.service import IndexerDefinitionsService
 from app.modules.playback_histories.schemas.internal import PlaybackHistoryClientInfo
 from app.modules.relay.dependencies import get_relay_service
 from app.modules.relay.service import RelayService
@@ -19,6 +25,7 @@ from app.modules.stream.dependencies import get_stream_service
 from app.modules.stream.schemas import StreamToken
 from app.modules.stream.service import StreamService
 from app.modules.torrents.dependencies import get_torrents_service
+from app.modules.torrents.details_url import match_details_url
 from app.modules.torrents.schemas.api import (
     TorrentAddRequest,
     TorrentResponse,
@@ -62,11 +69,44 @@ async def add_with_api_key(
     stream_service: Annotated[StreamService, Depends(get_stream_service)],
     torrents_service: Annotated[TorrentsService, Depends(get_torrents_service)],
     relay_service: Annotated[RelayService, Depends(get_relay_service)],
+    indexer_definitions_service: Annotated[
+        IndexerDefinitionsService, Depends(get_indexer_definitions_service)
+    ],
+    indexer_accounts_service: Annotated[
+        IndexerAccountsService, Depends(get_indexer_accounts_service)
+    ],
     user: AdminByApiKey,
 ):
+    # Csak olyan indexer jöhet szóba, amihez van beállított fiók.
+    account_ids = {
+        account.indexer_id for account in indexer_accounts_service.find_list()
+    }
+    definitions = [
+        definition
+        for definition in indexer_definitions_service.get_list()
+        if definition.id in account_ids
+    ]
+
+    if payload.url is not None:
+        resolved = match_details_url(payload.url, definitions)
+        if resolved is None:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="A link nem egy beállított indexer torrent adatlapja.",
+            )
+        indexer_id, torrent_id = resolved
+    else:
+        assert payload.indexer_id is not None and payload.torrent_id is not None
+        indexer_id, torrent_id = payload.indexer_id, payload.torrent_id
+        if indexer_id not in account_ids:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Nincs beállított fiók ehhez az indexerhez: {indexer_id}",
+            )
+
     torrent_with_relay, file_index = await stream_service.ensure_torrent(
-        indexer_id=payload.indexer_id,
-        torrent_id=payload.torrent_id,
+        indexer_id=indexer_id,
+        torrent_id=torrent_id,
         file_index=payload.file_index,
     )
 
@@ -86,8 +126,8 @@ async def add_with_api_key(
     )
     await stream_service.save_playback_history(
         stream_token=StreamToken(
-            indexer_id=payload.indexer_id,
-            torrent_id=payload.torrent_id,
+            indexer_id=indexer_id,
+            torrent_id=torrent_id,
             file_index=file_index,
             playback_id=uuid.uuid4().hex,
         ),

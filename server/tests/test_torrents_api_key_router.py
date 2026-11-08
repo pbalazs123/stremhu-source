@@ -9,6 +9,10 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.modules.auth.dependencies import get_auth_service
+from app.modules.indexer_accounts.dependencies import get_indexer_accounts_service
+from app.modules.indexer_definitions.dependencies import (
+    get_indexer_definitions_service,
+)
 from app.modules.relay.dependencies import get_relay_service
 from app.modules.stream.dependencies import get_stream_service
 from app.modules.stream.service import StreamService
@@ -68,10 +72,37 @@ def mocks():
         name="Film.2026.1080p.mkv", torrent=SimpleNamespace(name="Film.2026.1080p")
     )
 
+    definitions = MagicMock()
+    definitions.get_list.return_value = [
+        SimpleNamespace(
+            id="ncore",
+            url="https://ncore.pro",
+            details_path="/torrents.php?action=details&id={torrent_id}",
+        ),
+        SimpleNamespace(
+            id="bithumen",
+            url="https://bithumen.be",
+            details_path="/details.php?id={torrent_id}",
+        ),
+        SimpleNamespace(
+            id="filelist",
+            url="https://filelist.io",
+            details_path="/details.php?id={torrent_id}",
+        ),
+    ]
+    accounts = MagicMock()
+    # filelist is a known tracker, but without an account here
+    accounts.find_list.return_value = [
+        SimpleNamespace(indexer_id="ncore"),
+        SimpleNamespace(indexer_id="bithumen"),
+    ]
+
     app.dependency_overrides[get_auth_service] = lambda: auth
     app.dependency_overrides[get_stream_service] = lambda: stream
     app.dependency_overrides[get_torrents_service] = lambda: torrents
     app.dependency_overrides[get_relay_service] = lambda: relay
+    app.dependency_overrides[get_indexer_definitions_service] = lambda: definitions
+    app.dependency_overrides[get_indexer_accounts_service] = lambda: accounts
     try:
         yield SimpleNamespace(auth=auth, stream=stream, torrents=torrents, relay=relay)
     finally:
@@ -136,9 +167,59 @@ def test_add_with_options(client, mocks):
 
 
 @pytest.mark.parametrize(
+    ("url", "indexer_id", "torrent_id"),
+    [
+        (
+            "https://ncore.pro/torrents.php?action=details&id=3920123",
+            "ncore",
+            "3920123",
+        ),
+        ("https://bithumen.be/details.php?id=987654", "bithumen", "987654"),
+    ],
+)
+def test_add_by_link(client, mocks, url, indexer_id, torrent_id):
+    response = client.post("/api/key123/torrents/add", json={"url": url})
+
+    assert response.status_code == 200
+    mocks.stream.ensure_torrent.assert_awaited_once_with(
+        indexer_id=indexer_id, torrent_id=torrent_id, file_index=None
+    )
+    token = mocks.stream.save_playback_history.await_args.kwargs["stream_token"]
+    assert (token.indexer_id, token.torrent_id) == (indexer_id, torrent_id)
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        # a tracker without an account, by link and by id
+        {"url": "https://filelist.io/details.php?id=55"},
+        {"indexerId": "filelist", "torrentId": "55"},
+        # not a details page of any tracker
+        {"url": "https://evil.example/details.php?id=55"},
+        {"url": "https://ncore.pro/torrents.php?action=download&id=55"},
+    ],
+)
+def test_add_refuses_unknown_tracker_or_link(client, mocks, body):
+    response = client.post("/api/key123/torrents/add", json=body)
+
+    assert response.status_code == 400
+    mocks.stream.ensure_torrent.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
     "body",
     [
         {"indexerId": "ncore", "torrentId": "../1"},
+        # both ways at once, or neither, or only half of the id pair
+        {
+            "url": "https://ncore.pro/torrents.php?action=details&id=1",
+            "indexerId": "ncore",
+            "torrentId": "1",
+        },
+        {},
+        {"indexerId": "ncore"},
+        {"torrentId": "1"},
+        {"url": "x" * 501},
         {"indexerId": "ncore", "torrentId": ""},
         {"indexerId": "NCORE!", "torrentId": "1"},
         {"indexerId": "ncore", "torrentId": "1", "fileIndex": -1},
