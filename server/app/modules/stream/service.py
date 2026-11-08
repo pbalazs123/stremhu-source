@@ -56,6 +56,36 @@ class StreamService:
         torrent_id: str,
         file_index: int,
     ) -> tuple[ParsedRangeHeader, File]:
+        torrent_with_relay, file_index = await self.ensure_torrent(
+            indexer_id=indexer_id,
+            torrent_id=torrent_id,
+            file_index=file_index,
+        )
+
+        file = self._relay_service.get_torrent_file(
+            info_hash=torrent_with_relay.info_hash,
+            file_index=file_index,
+        )
+
+        parsed_range_header = self._parse_range_header(
+            file_size=file.size,
+            range_header=range_header,
+        )
+
+        return parsed_range_header, file
+
+    async def ensure_torrent(
+        self,
+        indexer_id: str,
+        torrent_id: str,
+        file_index: int | None,
+    ) -> tuple[TorrentWithRelay, int]:
+        """A torrentet a relay-be teszi, ha még nincs benne: a .torrent fájlt
+        szükség esetén letölti az indexerről.
+
+        Ha a file_index None, a torrent legnagyobb videófájlját választja.
+        Visszaadja a torrentet és a használt fájl indexet.
+        """
         self._isolated_torrent_files_service.touch(
             TorrentFileIdentifier(indexer_id=indexer_id, torrent_id=torrent_id)
         )
@@ -67,7 +97,8 @@ class StreamService:
                 torrent_id=torrent_id,
             )
 
-            if torrent_with_relay is None:
+            torrent_file: TorrentFileModel | None = None
+            if torrent_with_relay is None or file_index is None:
                 torrent_file = await asyncio.to_thread(
                     self._torrent_files_service.find_by_id,
                     indexer_id=indexer_id,
@@ -95,23 +126,29 @@ class StreamService:
                         torrent_bytes=downloaded_torrent_file.torrent_bytes,
                     )
 
+            if file_index is None:
+                assert torrent_file is not None
+                file_index = self._largest_video_index(torrent_file)
+
+            if torrent_with_relay is None:
+                assert torrent_file is not None
                 torrent_with_relay = await asyncio.to_thread(
                     self._create_torrent,
                     torrent_file=torrent_file,
                     file_index=file_index,
                 )
 
-        file = self._relay_service.get_torrent_file(
-            info_hash=torrent_with_relay.info_hash,
-            file_index=file_index,
-        )
+        return torrent_with_relay, file_index
 
-        parsed_range_header = self._parse_range_header(
-            file_size=file.size,
-            range_header=range_header,
-        )
-
-        return parsed_range_header, file
+    def _largest_video_index(self, torrent_file: TorrentFileModel) -> int:
+        videos = [
+            (file_info.size, index)
+            for index, file_info in enumerate(torrent_file.info.files)
+            if file_info.is_video
+        ]
+        if not videos:
+            raise HTTPException(400, "A torrentben nincs videófájl.")
+        return max(videos)[1]
 
     async def save_playback_history(
         self,

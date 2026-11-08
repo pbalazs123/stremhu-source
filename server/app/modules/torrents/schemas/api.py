@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic.alias_generators import to_camel
 
 from app.modules.indexer_definitions.schemas.api import IndexerDefinitionResponse
@@ -49,6 +49,22 @@ class TorrentResponse(BaseModel):
             updated_at=torrent_with_relay.torrent.updated_at,
             created_at=torrent_with_relay.torrent.created_at,
         )
+
+
+class TorrentAddRequest(BaseModel):
+    """Torrent hozzáadása az indexer azonosítója alapján (pl. nCore torrent ID)."""
+
+    model_config = ConfigDict(
+        populate_by_name=True,
+        alias_generator=to_camel,
+    )
+
+    indexer_id: str = Field(pattern=r"^[a-z0-9_-]{1,32}$")
+    torrent_id: str = Field(pattern=r"^[A-Za-z0-9_-]{1,64}$")
+    # None: a legnagyobb videófájl
+    file_index: int | None = Field(default=None, ge=0)
+    full_download: bool = True
+    is_persisted: bool | None = None
 
 
 class TorrentUpdateRequest(BaseModel):
