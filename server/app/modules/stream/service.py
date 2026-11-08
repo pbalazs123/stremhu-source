@@ -1,6 +1,7 @@
 import asyncio
 
 from fastapi import HTTPException
+from sqlalchemy.exc import OperationalError
 
 from app.common.database import isolated_db_session
 from app.common.keyed_lock import KeyedLock
@@ -32,6 +33,11 @@ from app.modules.torrents.service import TorrentsService
 
 torrent_locks = KeyedLock()
 playback_history_lock = KeyedLock()
+
+# Foglalt SQLite adatbázis ("database is locked") esetén ennyit vár
+# újrapróbálás előtt: enélkül az előzmény csendben elveszik
+# (és pl. egy debrid sidecar nem látja a torrentet).
+PLAYBACK_HISTORY_RETRY_DELAYS = (0.5, 1.0, 2.0, 4.0)
 
 
 class StreamService:
@@ -121,22 +127,31 @@ class StreamService:
         file: File,
         imdb_info: ImdbInfo | None = None,
     ) -> None:
+        payload = PlaybackHistoryCreate(
+            client=client_info,
+            indexer_id=stream_token.indexer_id,
+            playback_id=stream_token.playback_id,
+            user_id=user_id,
+            torrent_id=stream_token.torrent_id,
+            file_index=stream_token.file_index,
+            imdb_info=imdb_info,
+            torrent_name=file.torrent.name,
+            file_name=file.name,
+        )
         try:
             async with playback_history_lock(stream_token.playback_id):
-                await asyncio.to_thread(
-                    self._save_playback_history,
-                    PlaybackHistoryCreate(
-                        client=client_info,
-                        indexer_id=stream_token.indexer_id,
-                        playback_id=stream_token.playback_id,
-                        user_id=user_id,
-                        torrent_id=stream_token.torrent_id,
-                        file_index=stream_token.file_index,
-                        imdb_info=imdb_info,
-                        torrent_name=file.torrent.name,
-                        file_name=file.name,
-                    ),
-                )
+                for delay in (*PLAYBACK_HISTORY_RETRY_DELAYS, None):
+                    try:
+                        await asyncio.to_thread(self._save_playback_history, payload)
+                        return
+                    except OperationalError as e:
+                        if delay is None or "locked" not in str(e).lower():
+                            raise
+                        logger.info(
+                            f"Foglalt az adatbázis, {delay} mp múlva újra "
+                            "próbálja a lejátszási előzményt."
+                        )
+                        await asyncio.sleep(delay)
         except Exception as e:
             logger.warning(f"Nem sikerült menteni a lejátszási előzményt: {e}")
 
